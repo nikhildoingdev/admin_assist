@@ -7,38 +7,10 @@
     let SHOP_DOMAIN = urlParams.get('shop');
     getPrimaryShopDomain();
 
-    const THEME_SELCTOR = 'div.Polaris-BlockStack > [class*="ThemeListItem_"]';
-    const BASE_BRANCH = 'Main';
-
+    const THEME_SELCTOR = 'ul[class*="_ThemeList_"] > li';
+    const MORE_ACTIONS_SELECTOR = 'button[aria-label="Click for more theme actions"]';
     const COPY_ICON = chrome.runtime.getURL('icons/copy_icon.svg');
-    const RESYNC_ICON = chrome.runtime.getURL('icons/resync_icon.svg');
-
-    
-
-    console.log('THEME_SELCTOR', THEME_SELCTOR);
-    
-    let shouldHidePublish = false;
-    let hasResyncSecret = false;
-
-    chrome.storage.local.get(["hidePublish", "resyncSecret"], (result) => {
-        shouldHidePublish = result.hidePublish ?? true;
-        hasResyncSecret = Boolean(result.resyncSecret);
-        updatePublishButtonsVisibility(); 
-    });
-
-    chrome.storage.onChanged.addListener((changes) => {
-        if (!changes.resyncSecret) return;
-
-        hasResyncSecret = Boolean(changes.resyncSecret.newValue);
-        document.querySelectorAll(THEME_SELCTOR).forEach((row) => injectButton(row, getThemeDetails(row)));
-    });
-
-    chrome.runtime.onMessage.addListener((request) => {
-        if (request.action === "togglePublish") {
-            shouldHidePublish = request.hidePublish;
-            updatePublishButtonsVisibility();
-        }
-    });
+    const CHECK_ICON = chrome.runtime.getURL('icons/check_icon.svg');
 
     function getPrimaryShopDomain() {
         if (!SHOP_DOMAIN) return;
@@ -68,59 +40,42 @@
     const observer = new MutationObserver(() => {
         const themeRows = document.querySelectorAll(THEME_SELCTOR);
 
-        console.log('themeRows', themeRows);
-
         themeRows.forEach((row) => {
             const details = getThemeDetails(row);
-            console.log('details', details);
             
-            if (details.THEME_ID) {
-                injectButton(row, details);
-                handlePublishButton(row);
-            }
+            if (details.THEME_ID) injectButton(row, details);
         });
     });
 
     observer.observe(document, { childList: true, subtree: true });
 
-    function updatePublishButtonsVisibility() {
-        const themeRows = document.querySelectorAll(THEME_SELCTOR);
-        themeRows.forEach((row) => handlePublishButton(row));
-    }
-
-    function handlePublishButton(row) {
-        const publishButton = row.querySelector('s-internal-button[accessibilitylabel^="Publish"]');
-        if (!publishButton) return;
-        publishButton.style.display = shouldHidePublish ? 'none' : '';
-    }
-
     function injectButton(row, details) {
-        const buttonGroup = row.querySelector('.Polaris-ButtonGroup');
+        // The action bar is the InlineStack that holds the "…" more-actions button.
+        const moreBtn = row.querySelector(MORE_ACTIONS_SELECTOR);
+        const buttonGroup = moreBtn?.parentElement;
         if (!buttonGroup) return;
 
         if (!buttonGroup.querySelector('.adminflow-copy')) {
-            buttonGroup.insertBefore(createCopyButton(details), buttonGroup.lastChild);
+            buttonGroup.insertBefore(createCopyButton(details, moreBtn), moreBtn);
         }
-
-        const existingResync = buttonGroup.querySelector('.adminflow-resync');
-        const canResync = hasResyncSecret && details.repo && details.branchName && details.branchName !== BASE_BRANCH;
-
-        if (canResync && !existingResync) {
-            buttonGroup.insertBefore(createResyncButton(details), buttonGroup.lastChild);
-        }
-
-        if (!canResync && existingResync) existingResync.remove();
     }
 
-    function createActionButton(className, iconUrl, title, onClick) {
-        const btnWrapper = document.createElement('div');
-        btnWrapper.className = `Polaris-ButtonGroup__Item ${className}`;
+    // Shopify's class names are hashed per build, so copy them from the native
+    // "…" button in the same row to match its look rather than hard-coding.
+    function createActionButton(className, iconUrl, title, onClick, templateBtn) {
+        const btnWrapper = document.createElement('span');
+        btnWrapper.className = className;
 
         const btn = document.createElement('button');
-        btn.className = 'Polaris-Button Polaris-Button--variantSecondary Polaris-Button--sizeMedium';
+        btn.className = templateBtn?.className || 'Polaris-Button Polaris-Button--variantSecondary Polaris-Button--sizeMedium';
         btn.type = 'button';
         btn.title = title;
-        btn.innerHTML = `<span class="Polaris-Text--root Polaris-Text--bodySm Polaris-Text--medium"><img src="${iconUrl}" alt="" style="width: 16px; height: 16px; display: block;"></span>`;
+        btn.setAttribute('aria-label', title);
+        const icon = document.createElement('img');
+        icon.src = iconUrl;
+        icon.alt = '';
+        icon.style.cssText = 'width: 16px; height: 16px; display: block; transition: transform .1s ease-out, opacity .1s ease-out;';
+        btn.appendChild(icon);
 
         btn.onclick = (e) => {
             e.preventDefault();
@@ -133,36 +88,60 @@
         return btnWrapper;
     }
 
-    function createCopyButton(details) {
-        return createActionButton('adminflow-copy', COPY_ICON, 'Copy details', () => {
-            const textToCopy = `Theme ID: ${details.THEME_ID}\nTheme Name: ${details.themeName}\nTheme Preview: ${details.previewLink}\nGithub Branch: ${details.themeBranch}`;
-            navigator.clipboard.writeText(textToCopy);
-        });
+    function createCopyButton(details, templateBtn) {
+        let wrapper;
+
+        wrapper = createActionButton('adminflow-copy', COPY_ICON, 'Copy details', () => {
+            const btn = wrapper.querySelector('button');
+            const textToCopy = `Theme Details\nTheme ID: ${details.THEME_ID}\nTheme Name: ${details.themeName}\nTheme Preview: ${details.previewLink}\nGithub Branch: ${details.themeBranch}`;
+            navigator.clipboard.writeText(textToCopy)
+                .then(() => showCopied(btn))
+                .catch(() => {});
+        }, templateBtn);
+
+        return wrapper;
     }
 
-    function createResyncButton(details) {
-        const title = `Resync with ${BASE_BRANCH}`;
+    // Same cue Polaris uses for copy actions: the icon swaps to a checkmark
+    // with a small pop, then returns to the copy icon.
+    function showCopied(btn) {
+        const icon = btn.querySelector('img');
+        if (!icon || btn._copiedTimer) return;
 
-        return createActionButton('adminflow-resync', RESYNC_ICON, title, () => {
-            chrome.runtime.sendMessage({ action: 'resync', repo: details.repo, branch: details.branchName, base: BASE_BRANCH });
-        });
+        icon.style.transform = 'scale(0.6)';
+        icon.style.opacity = '0';
+        setTimeout(() => {
+            icon.src = CHECK_ICON;
+            icon.style.transform = 'scale(1)';
+            icon.style.opacity = '1';
+        }, 100);
+
+        btn._copiedTimer = setTimeout(() => {
+            icon.style.transform = 'scale(0.6)';
+            icon.style.opacity = '0';
+            setTimeout(() => {
+                icon.src = COPY_ICON;
+                icon.style.transform = 'scale(1)';
+                icon.style.opacity = '1';
+                btn._copiedTimer = null;
+            }, 100);
+        }, 800);
     }
 
     function getThemeDetails(theme) {
         const themeName = theme.querySelector('h3')?.textContent || "Unknown";
-        const branchLink = theme.querySelector('[class*="BranchName_"] > a')?.href || "";
-        const repoLink = theme.querySelector('[class*="RepositoryName_"] > a')?.href || "";
+        // The branch is only exposed via the "Open in GitHub" link in the
+        // GitHub popover: https://github.com/<owner>/<repo>/tree/<branch>
+        const branchLink = theme.querySelector('a[href^="https://github.com/"][href*="/tree/"]')?.href || "";
         const editorLink = theme.querySelector('a[href*="/editor"]')?.href || "";
         
         const themeIdMatch = editorLink.match(/\/themes\/(\d+)/);
         const THEME_ID = themeIdMatch ? themeIdMatch[1] : "";
 
         const themeBranch = branchLink || "No Branch";
-        const branchName = branchLink.split('/tree/')[1] || "";
-        const repo = repoLink.replace('https://github.com/', '');
 
         const previewLink = `https://${SHOP_DOMAIN}/?_ab=0&_fd=0&_sc=1&preview_theme_id=${THEME_ID}`;
 
-        return { themeName, themeBranch, branchName, repo, previewLink, THEME_ID };
+        return { themeName, themeBranch, previewLink, THEME_ID };
     }
 })();
